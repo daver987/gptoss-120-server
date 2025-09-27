@@ -27,13 +27,16 @@ def _load_tokenizer() -> AutoTokenizer:
 
 
 def _build_max_engine() -> Any:
-    from max.engine import InferenceSession, devices
-    from max.graph import KernelLibrary
+    from max.engine import InferenceSession
+    from max.driver import Accelerator
     from max.entrypoints.llm import LLM
     from max.pipelines import PipelineConfig
 
-    klib = KernelLibrary.load_paths(context=None, custom_extensions=[_CUSTOM_OPS_DIR])
-    session = InferenceSession(devices=[devices.CUDA(0)], custom_extensions=klib)
+    # Pass the directory containing your .mojo files; MAX will compile/load them.
+    session = InferenceSession(
+        devices=[Accelerator(0)],
+        custom_extensions=[_CUSTOM_OPS_DIR],
+    )
 
     pconf = PipelineConfig(model_path=MODEL_ID, dtype="auto")
     llm = LLM(pconf, session=session)

@@ -1,3 +1,81 @@
+# GPT-OSS 120B Server (MAX + Mojo custom ops)
+
+This repo exposes a Harmony/Responses-style `/v1/responses` endpoint and ships a custom Mojo kernel for **MXFP4** (quantize/dequantize/fused matvec). You can run locally on macOS (CPU/dev) or deploy to GPUs (H100/MI300X) via Docker.
+
+## 0) Install Mojo and MAX **without** Conda (UV recommended)
+
+Mojo/MAX can be installed via multiple package managers; if you want to avoid conda or pixi, use **uv**:
+
+1. Install uv (one-time):
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+````
+
+2. Install Modular CLI and Mojo / MAX SDKs (follow your account’s instructions):
+   See Modular’s install docs for **Mojo** and **MAX**; both show `uv` flows.
+
+   * Mojo install: [https://docs.modular.com/mojo/manual/install/](https://docs.modular.com/mojo/manual/install/)
+   * MAX packages: [https://docs.modular.com/max/packages/](https://docs.modular.com/max/packages/)
+3. Ensure environment variables are set (per the installer output), e.g. in `~/.zshrc`:
+
+   ```bash
+   export MODULAR_HOME="$HOME/.modular"
+   export PATH="$MODULAR_HOME/pkg/packages.modular.com_mojo/bin:$PATH"
+   ```
+
+   Confirm:
+
+   ```bash
+   mojo --version
+   python -c "import max; import mojo; print('OK')"
+   ```
+
+> References: Mojo install (uv path) and MAX package manager guidance.
+> (Docs are the source of truth for supported flows.)
+
+## 1) Python dependencies (no conda)
+
+Use `uv` to install the Python deps *in this repo*:
+
+```bash
+uv pip install -r serve/requirements.txt
+```
+
+## 2) Run tests locally (CPU/dev)
+
+```bash
+pytest
+```
+
+## 3) Start the server (local)
+
+```bash
+export ENGINE=max
+export MODEL_ID=openai/gpt-oss-120b
+uvicorn serve.responses_server:app --host 0.0.0.0 --port 8000
+```
+
+## 4) Docker (GPU)
+
+The provided `Dockerfile` uses `modular/max-nvidia-full`. Build and run:
+
+```bash
+docker build -t gptoss-120-server .
+docker run --gpus all -e MODEL_ID=openai/gpt-oss-120b -p 8000:8000 gptoss-120-server
+```
+
+## Notes on custom ops
+
+* Mojo custom ops are discovered by MAX via `InferenceSession(custom_extensions=[custom_ops_dir])`.
+* Our Mojo kernel uses `@compiler.register(...)` and imports `InputTensor/OutputTensor` from `max.tensor`.
+* GPU kernels write into `LayoutTensor[*, *, MutableAnyOrigin]` to permit device writes.
+
+If you hit Mojo syntax errors, check:
+
+* imports exactly match: `import compiler`, `from layout import Layout, LayoutTensor`, `from max.tensor import InputTensor, OutputTensor`, `from gpu import block_idx, thread_idx, block_dim`.
+* your `mojo` toolchain is current, and env vars (`MODULAR_HOME`, `PATH`) are applied to your shell.
+>⚠️ The real GPT-OSS-120B weights are far too large for a Mac laptop. Use the tests to validate behaviour locally; perform real inference inside a GPU container (Runpod, etc.).
+
 # GPT-OSS 120B Responses Server
 
 This repository implements a Harmony-compliant `/v1/responses` server for GPT-OSS-120B following the build plan in `INSTRUCTIONS.md`. The codebase now supports both MAX (preferred) and Hugging Face Transformers engines and ships custom Mojo MXFP4 kernels ready to be compiled inside the MAX runtime.
@@ -36,8 +114,6 @@ tests/                  # Server unit tests using stubbed runtime
    ```bash
    pixi run test
    ```
-
->⚠️ The real GPT-OSS-120B weights are far too large for a Mac laptop. Use the tests to validate behaviour locally; perform real inference inside a GPU container (Runpod, etc.).
 
 ## Running the server (GPU environment)
 

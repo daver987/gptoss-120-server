@@ -1,13 +1,11 @@
+"""MXFP4 Quantization and Dequantization Operations"""
 from math import floor, log2, ldexp
-from compiler import register
-from string import StaticString
-from layout import Layout, LayoutTensor, MutableAnyOrigin
-from tensor_internal import InputTensor, OutputTensor
+import compiler
+from layout import Layout, LayoutTensor
+from max.tensor import InputTensor, OutputTensor
 from runtime.asyncrt import DeviceContextPtr
 from gpu.host import DeviceContext
-from gpu.id import block_idx, thread_idx, block_dim
-from dtypes import DType
-from utils import constrained
+from gpu import block_idx, thread_idx, block_dim
 
 # -----------------------------------------------------------------------------
 # Constants & helpers
@@ -125,7 +123,7 @@ fn encode_mxfp4(val: Float32, d: Float32) -> UInt8:
 # -----------------------------------------------------------------------------
 # QUANTIZE: X[H,W] -> Q[H,W/2] + E[H,W/32]
 # -----------------------------------------------------------------------------
-@register("modular_ops::mxfp4_quantize_exq")
+@compiler.register("modular_ops::mxfp4_quantize_exq")
 struct MXFP4QuantizeEXQ:
     @staticmethod
     fn execute[
@@ -159,28 +157,37 @@ fn _mxfp4_quantize_cpu(
 ):
     alias H = X.shape[0]()
     alias W = X.shape[1]()
-    var blocks_per_row = W // QK_MXFP4
+    let blocks_per_row = W // QK_MXFP4
+
+    # Bind element widths (compile-time) for constructing SIMD values
+    alias XW = X.element_layout.size()
+    alias QW = Q.element_layout.size()
+    alias EW = E.element_layout.size()
+
     for r in range(H):
         for b in range(blocks_per_row):
-            var c0 = b * QK_MXFP4
+            let c0 = b * QK_MXFP4
             var m: Float32 = 0.0
             for j in range(QK_MXFP4):
-                var f: Float32 = X[r, c0 + j].cast[DType.float32]()
-                var af = f if f >= 0.0 else -f
+                # READ: lane 0 of SIMD element → scalar (Float32 is SIMD[f32,1] alias)
+                let f: Float32 = X[r, c0 + j].cast[DType.float32]()[0]
+                let af = (f if f >= 0.0 else -f)
                 if af > m:
                     m = af
-            var e: UInt8 = fp32_to_e8m0_from_block_max(m)
-            E[r, b] = e
-            var d: Float32 = e8m0_to_fp32(e)
-            var q_base = b * (QK_MXFP4 // 2)
+            let e: UInt8 = fp32_to_e8m0_from_block_max(m)
+            # WRITE: splat e as SIMD[u8, EW]
+            E[r, b] = SIMD[DType.uint8, EW](e)
+            let d: Float32 = e8m0_to_fp32(e)
+
+            let q_base = b * (QK_MXFP4 // 2)
             for j in range(QK_MXFP4 // 2):
-                var v0: Float32 = X[r, c0 + j].cast[DType.float32]()
-                var v1: Float32 = X[r, c0 + j + QK_MXFP4 // 2].cast[
-                    DType.float32
-                ]()
-                var i0: UInt8 = encode_mxfp4(v0, d)
-                var i1: UInt8 = encode_mxfp4(v1, d)
-                Q[r, q_base + j] = (UInt8(i1) << 4) | (i0 & 0x0F)
+                let v0: Float32 = X[r, c0 + j].cast[DType.float32]()[0]
+                let v1: Float32 = X[r, c0 + j + QK_MXFP4 // 2].cast[DType.float32]()[0]
+                let i0: UInt8 = encode_mxfp4(v0, d)
+                let i1: UInt8 = encode_mxfp4(v1, d)
+                let packed: UInt8 = (UInt8(i1) << 4) | (i0 & 0x0F)
+                # WRITE: splat into SIMD[u8, QW]
+                Q[r, q_base + j] = SIMD[DType.uint8, QW](packed)
 
 
 fn _mxfp4_quantize_kernel[
@@ -201,59 +208,64 @@ fn _mxfp4_quantize_kernel[
     var tile_q = Q.tile[BN, BD // 2](block_idx.y, block_idx.x)
     var tile_e = E.tile[BN, BD // QK_MXFP4](block_idx.y, block_idx.x)
 
-    var Ht = min_int(BN, X.shape[0]() - block_idx.y * BN)
-    var Wt = min_int(BD, X.shape[1]() - block_idx.x * BD)
-    var CBLK = Wt // QK_MXFP4
+    let Ht = min_int(BN, X.shape[0]() - block_idx.y * BN)
+    let Wt = min_int(BD, X.shape[1]() - block_idx.x * BD)
+    let CBLK = Wt // QK_MXFP4
     if CBLK <= 0:
         return
 
-    var T = Int(block_dim.x)
+    # Bind element widths for SIMD construction
+    alias XW = X.element_layout.size()
+    alias QW = Q.element_layout.size()
+    alias EW = E.element_layout.size()
+
+    let T = Int(block_dim.x)
     for r in range(Ht):
         var t = Int(thread_idx.x)
         while t < CBLK:
-            var c0 = t * QK_MXFP4
+            let c0 = t * QK_MXFP4
             var m: Float32 = 0.0
             for j in range(QK_MXFP4):
-                var f: Float32 = tile_x[r, c0 + j].cast[DType.float32]()
-                var af = f if f >= 0.0 else -f
+                let f: Float32 = tile_x[r, c0 + j].cast[DType.float32]()[0]
+                let af = (f if f >= 0.0 else -f)
                 if af > m:
                     m = af
-            var e: UInt8 = fp32_to_e8m0_from_block_max(m)
-            tile_e[r, t] = e
-            var d: Float32 = e8m0_to_fp32(e)
-            var q_base = t * (QK_MXFP4 // 2)
+            let e: UInt8 = fp32_to_e8m0_from_block_max(m)
+            tile_e[r, t] = SIMD[DType.uint8, EW](e)
+            let d: Float32 = e8m0_to_fp32(e)
+
+            let q_base = t * (QK_MXFP4 // 2)
             for j in range(QK_MXFP4 // 2):
-                var v0: Float32 = tile_x[r, c0 + j].cast[DType.float32]()
-                var v1: Float32 = tile_x[r, c0 + j + QK_MXFP4 // 2].cast[
-                    DType.float32
-                ]()
-                var i0: UInt8 = encode_mxfp4(v0, d)
-                var i1: UInt8 = encode_mxfp4(v1, d)
-                tile_q[r, q_base + j] = (UInt8(i1) << 4) | (i0 & 0x0F)
+                let v0: Float32 = tile_x[r, c0 + j].cast[DType.float32]()[0]
+                let v1: Float32 = tile_x[r, c0 + j + QK_MXFP4 // 2].cast[DType.float32]()[0]
+                let i0: UInt8 = encode_mxfp4(v0, d)
+                let i1: UInt8 = encode_mxfp4(v1, d)
+                let packed: UInt8 = (UInt8(i1) << 4) | (i0 & 0x0F)
+                tile_q[r, q_base + j] = SIMD[DType.uint8, QW](packed)
             t += T
 
 
 def _mxfp4_quantize_gpu[
     BN: Int, BD: Int
-](ctx: DeviceContext, X: LayoutTensor, Q: LayoutTensor, E: LayoutTensor,):
+](ctx: DeviceContext, X: LayoutTensor, Q: LayoutTensor, E: LayoutTensor):
     alias kernel = _mxfp4_quantize_kernel[
         X.dtype, X.layout, Q.dtype, Q.layout, E.dtype, E.layout, BN, BD
     ]
-    var cblk_per_tile = BD // QK_MXFP4
-    var tpb = max_int(1, min_int(32, cblk_per_tile))
+    let cblk_per_tile = BD // QK_MXFP4
+    let tpb = max_int(1, min_int(32, cblk_per_tile))
     ctx.enqueue_function[kernel](
         X,
         Q,
         E,
         grid_dim=(ceil_div(X.shape[1](), BD), ceil_div(X.shape[0](), BN)),
-        block_dim=(tpb),
+        block_dim=tpb,
     )
 
 
 # -----------------------------------------------------------------------------
 # DEQUANTIZE: (Q[H,W/2], E[H,W/32]) -> X[H,W]
 # -----------------------------------------------------------------------------
-@register("modular_ops::mxfp4_dequantize_exq")
+@compiler.register("modular_ops::mxfp4_dequantize_exq")
 struct MXFP4DequantizeEXQ:
     @staticmethod
     fn execute[
@@ -280,25 +292,33 @@ struct MXFP4DequantizeEXQ:
             _mxfp4_dequantize_gpu[BN, BD](dev, Q, E, X)
 
 
-fn _mxfp4_dequantize_cpu(
-    Q: LayoutTensor,
-    E: LayoutTensor,
-    mut X: LayoutTensor,
-):
+fn _mxfp4_dequantize_cpu(Q: LayoutTensor, E: LayoutTensor, mut X: LayoutTensor):
     alias H = X.shape[0]()
     alias W = X.shape[1]()
-    var blocks_per_row = W // QK_MXFP4
+    let blocks_per_row = W // QK_MXFP4
+
+    alias QW = Q.element_layout.size()
+    alias EW = E.element_layout.size()
+    alias XD = X.dtype
+    alias XW = X.element_layout.size()
+
     for r in range(H):
         for b in range(blocks_per_row):
-            var c0 = b * QK_MXFP4
-            var d: Float32 = e8m0_to_fp32(E[r, b].cast[DType.uint8]())
-            var q_base = b * (QK_MXFP4 // 2)
+            let c0 = b * QK_MXFP4
+            let e_lane0: UInt8 = E[r, b].cast[DType.uint8]()[0]
+            let d: Float32 = e8m0_to_fp32(e_lane0)
+            let q_base = b * (QK_MXFP4 // 2)
             for j in range(QK_MXFP4 // 2):
-                var byte_val: UInt8 = Q[r, q_base + j].cast[DType.uint8]()
-                var i0: UInt8 = byte_val & 0x0F
-                var i1: UInt8 = byte_val >> 4
-                X[r, c0 + j] = unit_from_code(i0) * d
-                X[r, c0 + j + QK_MXFP4 // 2] = unit_from_code(i1) * d
+                let byte_val0: UInt8 = Q[r, q_base + j].cast[DType.uint8]()[0]
+                let i0: UInt8 = byte_val0 & UInt8(0x0F)
+                let i1: UInt8 = byte_val0 >> 4
+                let v0f: Float32 = unit_from_code(i0) * d
+                let v1f: Float32 = unit_from_code(i1) * d
+                # Cast Float32 -> XD, then splat to XW on write
+                let v0c: SIMD[XD, 1] = v0f.cast[XD]()
+                let v1c: SIMD[XD, 1] = v1f.cast[XD]()
+                X[r, c0 + j] = SIMD[XD, XW](v0c)
+                X[r, c0 + j + QK_MXFP4 // 2] = SIMD[XD, XW](v1c)
 
 
 fn _mxfp4_dequantize_kernel[
@@ -319,49 +339,56 @@ fn _mxfp4_dequantize_kernel[
     var tile_e = E.tile[BN, BD // QK_MXFP4](block_idx.y, block_idx.x)
     var tile_x = X.tile[BN, BD](block_idx.y, block_idx.x)
 
-    var Ht = min_int(BN, X.shape[0]() - block_idx.y * BN)
-    var Wt = min_int(BD, X.shape[1]() - block_idx.x * BD)
-    var CBLK = Wt // QK_MXFP4
+    let Ht = min_int(BN, X.shape[0]() - block_idx.y * BN)
+    let Wt = min_int(BD, X.shape[1]() - block_idx.x * BD)
+    let CBLK = Wt // QK_MXFP4
     if CBLK <= 0:
         return
 
-    var T = Int(block_dim.x)
+    alias XD = X.dtype
+    alias XW = X.element_layout.size()
+    alias QW = Q.element_layout.size()
+    alias EW = E.element_layout.size()
+
+    let T = Int(block_dim.x)
     for r in range(Ht):
         var t = Int(thread_idx.x)
         while t < CBLK:
-            var d: Float32 = e8m0_to_fp32(tile_e[r, t].cast[DType.uint8]())
-            var q_base = t * (QK_MXFP4 // 2)
-            var x_base = t * QK_MXFP4
+            let d: Float32 = e8m0_to_fp32(tile_e[r, t].cast[DType.uint8]()[0])
+            let q_base = t * (QK_MXFP4 // 2)
+            let x_base = t * QK_MXFP4
             for j in range(QK_MXFP4 // 2):
-                var byte_val: UInt8 = tile_q[r, q_base + j].cast[DType.uint8]()
-                var i0: UInt8 = byte_val & 0x0F
-                var i1: UInt8 = byte_val >> 4
-                tile_x[r, x_base + j] = unit_from_code(i0) * d
-                tile_x[r, x_base + j + QK_MXFP4 // 2] = unit_from_code(i1) * d
+                let byte0: UInt8 = tile_q[r, q_base + j].cast[DType.uint8]()[0]
+                let i0: UInt8 = byte0 & UInt8(0x0F)
+                let i1: UInt8 = byte0 >> 4
+                let v0c: SIMD[XD, 1] = (unit_from_code(i0) * d).cast[XD]()
+                let v1c: SIMD[XD, 1] = (unit_from_code(i1) * d).cast[XD]()
+                tile_x[r, x_base + j] = SIMD[XD, XW](v0c)
+                tile_x[r, x_base + j + QK_MXFP4 // 2] = SIMD[XD, XW](v1c)
             t += T
 
 
 def _mxfp4_dequantize_gpu[
     BN: Int, BD: Int
-](ctx: DeviceContext, Q: LayoutTensor, E: LayoutTensor, X: LayoutTensor,):
+](ctx: DeviceContext, Q: LayoutTensor, E: LayoutTensor, X: LayoutTensor):
     alias kernel = _mxfp4_dequantize_kernel[
         Q.dtype, Q.layout, E.dtype, E.layout, X.dtype, X.layout, BN, BD
     ]
-    var cblk_per_tile = BD // QK_MXFP4
-    var tpb = max_int(1, min_int(32, cblk_per_tile))
+    let cblk_per_tile = BD // QK_MXFP4
+    let tpb = max_int(1, min_int(32, cblk_per_tile))
     ctx.enqueue_function[kernel](
         Q,
         E,
         X,
         grid_dim=(ceil_div(X.shape[1](), BD), ceil_div(X.shape[0](), BN)),
-        block_dim=(tpb),
+        block_dim=tpb,
     )
 
 
 # -----------------------------------------------------------------------------
 # FUSED DEQUANT-DOT: (Q[H,W/2], E[H,W/32]) · x[W] -> y[H]
 # -----------------------------------------------------------------------------
-@register("modular_ops::mxfp4_qmatvec_f32_exq")
+@compiler.register("modular_ops::mxfp4_qmatvec_f32_exq")
 struct MXFP4QMatVecF32EXQ:
     @staticmethod
     fn execute[
@@ -388,32 +415,29 @@ struct MXFP4QMatVecF32EXQ:
 
 
 fn _mxfp4_matvec_cpu(
-    Q: LayoutTensor,
-    E: LayoutTensor,
-    Xv: LayoutTensor,
-    mut Y: LayoutTensor,
+    Q: LayoutTensor, E: LayoutTensor, Xv: LayoutTensor, mut Y: LayoutTensor
 ):
     alias H = Q.shape[0]()
     alias W2 = Q.shape[1]()
-    var W = W2 * 2
-    var blocks = W // QK_MXFP4
+    let W = W2 * 2
+    let blocks = W // QK_MXFP4
     for r in range(H):
         var acc: Float32 = 0.0
         for b in range(blocks):
-            var d: Float32 = e8m0_to_fp32(E[r, b].cast[DType.uint8]())
-            var q_base = b * (QK_MXFP4 // 2)
-            var x_base = b * QK_MXFP4
+            let d: Float32 = e8m0_to_fp32(E[r, b].cast[DType.uint8]()[0])
+            let q_base = b * (QK_MXFP4 // 2)
+            let x_base = b * QK_MXFP4
             for j in range(QK_MXFP4 // 2):
-                var byte_val: UInt8 = Q[r, q_base + j].cast[DType.uint8]()
-                var i0: UInt8 = byte_val & 0x0F
-                var i1: UInt8 = byte_val >> 4
-                var v0 = unit_from_code(i0) * d
-                var v1 = unit_from_code(i1) * d
-                var x0: Float32 = Xv[x_base + j].cast[DType.float32]()
-                var x1: Float32 = Xv[x_base + j + QK_MXFP4 // 2].cast[
-                    DType.float32
-                ]()
+                let byte0: UInt8 = Q[r, q_base + j].cast[DType.uint8]()[0]
+                let i0: UInt8 = byte0 & UInt8(0x0F)
+                let i1: UInt8 = byte0 >> 4
+                let v0 = unit_from_code(i0) * d
+                let v1 = unit_from_code(i1) * d
+                let x0: Float32 = Xv[x_base + j].cast[DType.float32]()[0]
+                let x1: Float32 = Xv[x_base + j + QK_MXFP4 // 2].cast[DType.float32]()[0]
                 acc += v0 * x0 + v1 * x1
+        # Y is rank-1 float32; when run on CPU path we can still assign scalar here;
+        # (GPU kernel scope handles SIMD write explicitly.)
         Y[r] = acc
 
 
@@ -427,34 +451,36 @@ fn _mxfp4_matvec_kernel[
     y_dtype: DType,
     y_layout: Layout,
 ](
-    Q: LayoutTensor[q_dtype, q_layout, MutableAnyOrigin],
-    E: LayoutTensor[e_dtype, e_layout, MutableAnyOrigin],
-    X: LayoutTensor[x_dtype, x_layout, MutableAnyOrigin],
-    Y: LayoutTensor[y_dtype, y_layout, MutableAnyOrigin],
+    Q: LayoutTensor[q_dtype, q_layout],
+    E: LayoutTensor[e_dtype, e_layout],
+    X: LayoutTensor[x_dtype, x_layout],
+    Y: LayoutTensor[y_dtype, y_layout],
 ):
-    var r = Int(block_idx.y) * Int(block_dim.y) + Int(thread_idx.y)
+    let r = Int(block_idx.y) * Int(block_dim.y) + Int(thread_idx.y)
     if r >= Q.shape[0]():
         return
 
-    var W = Q.shape[1]() * 2
-    var blocks = W // QK_MXFP4
+    alias YD = Y.dtype
+    alias YW = Y.element_layout.size()
+
+    let W = Q.shape[1]() * 2
+    let blocks = W // QK_MXFP4
     var acc: Float32 = 0.0
     for b in range(blocks):
-        var d: Float32 = e8m0_to_fp32(E[r, b].cast[DType.uint8]())
-        var q_base = b * (QK_MXFP4 // 2)
-        var x_base = b * QK_MXFP4
+        let d: Float32 = e8m0_to_fp32(E[r, b].cast[DType.uint8]()[0])
+        let q_base = b * (QK_MXFP4 // 2)
+        let x_base = b * QK_MXFP4
         for j in range(QK_MXFP4 // 2):
-            var byte_val: UInt8 = Q[r, q_base + j].cast[DType.uint8]()
-            var i0: UInt8 = byte_val & 0x0F
-            var i1: UInt8 = byte_val >> 4
-            var v0 = unit_from_code(i0) * d
-            var v1 = unit_from_code(i1) * d
-            var x0: Float32 = X[x_base + j].cast[DType.float32]()
-            var x1: Float32 = X[x_base + j + QK_MXFP4 // 2].cast[
-                DType.float32
-            ]()
+            let byte0: UInt8 = Q[r, q_base + j].cast[DType.uint8]()[0]
+            let i0: UInt8 = byte0 & UInt8(0x0F)
+            let i1: UInt8 = byte0 >> 4
+            let v0 = unit_from_code(i0) * d
+            let v1 = unit_from_code(i1) * d
+            let x0: Float32 = X[x_base + j].cast[DType.float32]()[0]
+            let x1: Float32 = X[x_base + j + QK_MXFP4 // 2].cast[DType.float32]()[0]
             acc += v0 * x0 + v1 * x1
-    Y[r] = acc
+    # WRITE: splat acc into Y's element width/type
+    Y[r] = SIMD[YD, YW](acc.cast[YD]())
 
 
 def _mxfp4_matvec_gpu(
@@ -474,7 +500,7 @@ def _mxfp4_matvec_gpu(
         Y.dtype,
         Y.layout,
     ]
-    var grid_y = Q.shape[0]()
+    let grid_y = Q.shape[0]()
     ctx.enqueue_function[kernel](
         Q,
         E,
