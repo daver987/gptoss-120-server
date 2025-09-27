@@ -163,13 +163,14 @@ The repository includes a Cloud Build configuration (`cloudbuild.yaml`) and a he
 
 ```bash
 ./scripts/cloud_build.sh \
-  PROJECT_ID=focused-sentry-442212-q8 \
-  REGION=us \
-  AR_REPO=gptoss-120-server \
-  IMAGE_NAME=gptoss-mxfp4
+  PROJECT_ID=\
+  REGION= \
+  AR_REPO= \
+  IMAGE_NAME=
 ```
 
 The script will:
+
 - ensure the Artifact Registry repository exists (`REGION-docker.pkg.dev/PROJECT_ID/AR_REPO`),
 - submit the build using Cloud Build,
 - push images tagged with both the current git short SHA and `latest`.
