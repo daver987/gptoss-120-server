@@ -1,4 +1,4 @@
-FROM modular/max-nvidia-full:25.6
+FROM modular/max-nvidia-full:25.6.0.dev2025090605
 
 WORKDIR /app
 COPY custom_ops ./custom_ops
