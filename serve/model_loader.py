@@ -11,6 +11,7 @@ from transformers import AutoTokenizer
 ENGINE = os.getenv("ENGINE", "max").lower()
 MODEL_ID = os.getenv("MODEL_ID", "openai/gpt-oss-120b")
 HF_TOKEN = os.getenv("HF_TOKEN")
+USE_CUSTOM_OPS = os.getenv("USE_CUSTOM_OPS", "0") == "1"  # NEW: default off for BF16
 
 _CUSTOM_OPS_DIR = Path(__file__).resolve().parents[1] / "custom_ops"
 _TOKENIZER: AutoTokenizer | None = None
@@ -27,17 +28,23 @@ def _load_tokenizer() -> AutoTokenizer:
 
 
 def _build_max_engine() -> Any:
+    # MAX offline engine; accepts either HF repo id OR a local directory path for model_path
     from max.engine import InferenceSession
     from max.driver import Accelerator
     from max.entrypoints.llm import LLM
     from max.pipelines import PipelineConfig
 
-    # Pass the directory containing your .mojo files; MAX will compile/load them.
+    custom_exts = []
+    if USE_CUSTOM_OPS and _CUSTOM_OPS_DIR.exists():
+        # Only try to compile Mojo ops when explicitly enabled
+        custom_exts = [_CUSTOM_OPS_DIR]
+
     session = InferenceSession(
         devices=[Accelerator(0)],
-        custom_extensions=[_CUSTOM_OPS_DIR],
+        custom_extensions=custom_exts,
     )
 
+    # MODEL_ID may be a local path (e.g., /models/gptoss-20b-bf16) or an HF repo id.
     pconf = PipelineConfig(model_path=MODEL_ID, dtype="auto")
     llm = LLM(pconf, session=session)
 

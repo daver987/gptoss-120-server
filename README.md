@@ -76,7 +76,7 @@ If you hit Mojo syntax errors, check:
 
 - imports exactly match: `import compiler`, `from layout import Layout, LayoutTensor`, `from max.tensor import InputTensor, OutputTensor`, `from gpu import block_idx, thread_idx, block_dim`.
 - your `mojo` toolchain is current, and env vars (`MODULAR_HOME`, `PATH`) are applied to your shell.
-  > ⚠️ The real GPT-OSS-120B weights are far too large for a Mac laptop. Use the tests to validate behaviour locally; perform real inference inside a GPU container (Runpod, etc.).
+  > ⚠️ The real GPT-OSS-120B weights are far too large for a Mac laptop. Use the tests to validate behaviour locally; perform real inference inside a GPU container (Runpod, etc).
 
 # GPT-OSS 120B Responses Server
 
@@ -157,6 +157,59 @@ Although Docker cannot run on this Mac, you can still build the container image 
 
 Continue with the detailed Runpod bring-up instructions from the latest guidance once you are on a GPU pod.
 
+# GPT-OSS 120B/20B Server (MAX + Mojo custom ops)
+
+This server exposes a Harmony/Responses-style `/v1/responses` endpoint. You can run entirely from a **Runpod start script**—no custom Docker build needed.
+
+## Run the BF16 20B model (local path) on MAX
+
+MAX can load a model from **Hugging Face** *or from a local directory path* via `PipelineConfig(model_path=...)`. For a quick win, use **gpt-oss-20b BF16** from Modular’s builds and point MAX to that path. :contentReference[oaicite:3]{index=3}
+
+### Runpod setup (script-only)
+
+**Environment variables (example):**
+```
+
+REPO_URL=[https://github.com/](https://github.com/)<you>/gptoss-120-server.git
+BRANCH=main
+ENGINE=max
+USE_CUSTOM_OPS=0
+MODEL_ID=/models/gptoss-20b-bf16
+MOD_MODEL_URL=[https://builds.modular.com/models/gpt-oss-20b-BF16/20B](https://builds.modular.com/models/gpt-oss-20b-BF16/20B)
+PORT=8000
+HF_TOKEN=   # optional
+
+```
+
+**Start Script**:
+```
+
+bash -lc 'bash /workspace/gptoss-120-server/scripts/runpod_bootstrap.sh'
+
+````
+
+This will:
+1. Install **uv** (no conda) and the **MAX/Mojo** toolchain.
+2. Clone this repo and install Python deps.
+3. Download the **BF16 20B** build to `/models/gptoss-20b-bf16` (if `MOD_MODEL_URL` set).
+4. Start the server, loading the model from the **local path** (`MODEL_ID=/models/gptoss-20b-bf16`).
+
+> **VRAM note:** BF16 20B uses ~40 GB for weights; total VRAM footprint is commonly **~45–60 GB** with KV cache and runtime overhead, so a single **H100 80GB** is appropriate. :contentReference[oaicite:4]{index=4}
+
+## Local (macOS) quickstart without conda
+
+Use **uv**:
+```bash
+uv pip install -r serve/requirements.txt
+pytest     # local tests
+ENGINE=max USE_CUSTOM_OPS=0 MODEL_ID=/path/to/local/model \
+  uvicorn serve.responses_server:app --host 0.0.0.0 --port 8000
+````
+
+## Why USE_CUSTOM_OPS=0?
+
+For **BF16** models you don’t need MXFP4 custom ops. Disabling them avoids compiling Mojo kernels on bring‑up. You can turn them back on later (`USE_CUSTOM_OPS=1`) if you experiment with quantized paths.
+
 ## Building with Google Cloud Build
 
 The repository includes a Cloud Build configuration (`cloudbuild.yaml`) and a helper script (`scripts/cloud_build.sh`) that targets Artifact Registry.
@@ -182,3 +235,4 @@ Adjust environment variables as needed if you prefer a different region or repos
 - Implement the tiled MXFP4 qGEMM for prefill (Stage B of the plan) and integrate batching (Stage C).
 - Capture `/bench` metrics before and after kernel optimizations to track TPS improvements.
 - Follow the Runpod instructions to deploy on an H100 pod once the container image is available.
+
