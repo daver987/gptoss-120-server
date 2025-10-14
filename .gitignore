@@ -1,3 +1,55 @@
-# pixi environments
-.pixi/*
-!.pixi/config.toml
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+*.manifest
+*.spec
+*.log
+
+# Mojo
+*.mojo_cache/
+*.mojo_build/
+*.mojo_tmp/
+*.mojo.lock
+
+# uv (universal virtualenv)
+.venv/
+.uv/
+uv-env/
+uv-venv/
+.uv_cache/
+
+# Jupyter/IPython
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# System
+Thumbs.db
+
+# Test/coverage
+.coverage
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+
+# Misc
+*.swp
+*.swo
+*.bak
+*.tmp
+
+.ruff_cache/
