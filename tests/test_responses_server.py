@@ -2,7 +2,6 @@ import importlib
 import sys
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -10,7 +9,9 @@ if str(ROOT) not in sys.path:
 
 
 class DummyTokenizer:
-    def apply_chat_template(self, messages, tokenize=False, add_generation_prompt=False):
+    def apply_chat_template(
+        self, messages, tokenize=False, add_generation_prompt=False
+    ):
         rendered = "\n".join(f"{m['role'].upper()}: {m['content']}" for m in messages)
         if add_generation_prompt:
             rendered += "\nASSISTANT:"
@@ -23,14 +24,17 @@ class DummyTokenizer:
 class EchoEngine:
     def generate(self, prompts, max_new_tokens=1024):
         return [
-            "<|start|>assistant<|channel|>final<|message|>Echo: " + (prompts[0] if prompts else "")
+            "<|start|>assistant<|channel|>final<|message|>Echo: "
+            + (prompts[0] if prompts else "")
         ]
 
 
 def _load_module(monkeypatch):
     module = importlib.import_module("serve.responses_server")
     importlib.reload(module)
-    monkeypatch.setattr(module, "_get_runtime", lambda: (EchoEngine(), DummyTokenizer()))
+    monkeypatch.setattr(
+        module, "_get_runtime", lambda: (EchoEngine(), DummyTokenizer())
+    )
     return module
 
 
@@ -59,7 +63,7 @@ def test_tool_call_parsing(monkeypatch):
         def generate(self, prompts, max_new_tokens=1024):
             return [
                 "<|start|>assistant<|channel|>commentary to=functions.test_tool "
-                "<|message|>{\"value\": 1}"
+                '<|message|>{"value": 1}'
             ]
 
     monkeypatch.setattr(module, "_get_runtime", lambda: (DummyLLM(), DummyTokenizer()))

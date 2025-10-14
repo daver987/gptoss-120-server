@@ -1,238 +1,67 @@
-# GPT-OSS 120B Server (MAX + Mojo custom ops)
+# max-gpt-oss-mxfp4
 
-This repo exposes a Harmony/Responses-style `/v1/responses` endpoint and ships a custom Mojo kernel for **MXFP4** (quantize/dequantize/fused matvec). You can run locally on macOS (CPU/dev) or deploy to GPUs (H100/MI300X) via Docker.
+Run **OpenAI gpt-oss** on **Modular MAX** with **custom MXFP4 kernels** (Mojo) for MoE FFN linears, and serve via an **OpenAI Responses API** shim that preserves Harmony.
 
-## 0) Install Mojo and MAX **without** Conda (UV recommended)
+### Prereqs
 
-Mojo/MAX can be installed via multiple package managers; if you want to avoid conda or pixi, use **uv**:
+- Linux or macOS with a recent NVIDIA/AMD GPU and drivers.
+- Python 3.10+ (recommend `uv` or `pixi`)
+- Modular MAX + Mojo installed (see docs).
+  - `uv pip install modular --extra-index-url https://modular.gateway.scarf.sh/simple/`
+  - Or use conda/pixi as in docs.
+- Hugging Face CLI (`pip install huggingface_hub`) **optional** – the `max` CLI will pull weights too.
 
-1. Install uv (one-time):
+> References: MAX OpenAI server and custom architectures/ops.  
+> GPT‑OSS + Harmony format.
 
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-
-2. Install Modular CLI and Mojo / MAX SDKs (follow your account’s instructions):
-   See Modular’s install docs for **Mojo** and **MAX**; both show `uv` flows.
-
-   - Mojo install: [https://docs.modular.com/mojo/manual/install/](https://docs.modular.com/mojo/manual/install/)
-   - MAX packages: [https://docs.modular.com/max/packages/](https://docs.modular.com/max/packages/)
-
-3. Ensure environment variables are set (per the installer output), e.g. in `~/.zshrc`:
-
-   ```bash
-   export MODULAR_HOME="$HOME/.modular"
-   export PATH="$MODULAR_HOME/pkg/packages.modular.com_mojo/bin:$PATH"
-   ```
-
-   Confirm:
-
-   ```bash
-   mojo --version
-   python -c "import max; import mojo; print('OK')"
-   ```
-
-> References: Mojo install (uv path) and MAX package manager guidance.
-> (Docs are the source of truth for supported flows.)
-
-## 1) Python dependencies (no conda)
-
-Use `uv` to install the Python deps _in this repo_:
+### Quickstart (one terminal runs MAX, one runs the Responses shim)
 
 ```bash
-uv pip install -r serve/requirements.txt
+# 0) clone
+git clone https://github.com/you/max-gpt-oss-mxfp4.git
+cd max-gpt-oss-mxfp4
+
+# 1) python deps (fastapi shim, harmony helpers)
+uv venv && source .venv/bin/activate
+uv pip install -e .
+
+# 2) run MAX server with custom architecture (loads Mojo kernels at graph build)
+#    Choose one model: openai/gpt-oss-20b (fits ~16GB) or /120b (fits 80GB class)
+make max-serve MODEL=openai/gpt-oss-20b DEVICES=gpu:0
+
+# 3) in a new terminal, run the /v1/responses shim that maps to MAX’s /v1/chat/completions
+make responses-shim
 ```
 
-## 2) Run tests locally (CPU/dev)
+## Test
+
+### Responses API-style request with Harmony role/messages; tools are passed through.
+
+In another terminal, run:
 
 ```bash
-pytest
+curl -s http://localhost:9000/v1/responses \
+  -H 'content-type: application/json' \
+  -d '{
+        "model": "openai/gpt-oss-20b",
+        "input": [
+          {"role":"system","content":"You are helpful."},
+          {"role":"user","content":"Explain MXFP4 in 2 bullets."}
+        ],
+        "max_output_tokens": 128
+      }' | jq
 ```
 
-## 3) Start the server (local)
+### Notes
 
-```bash
-export ENGINE=max
-export MODEL_ID=openai/gpt-oss-120b
-uvicorn serve.responses_server:app --host 0.0.0.0 --port 8000
-```
+Harmony: gpt-oss expects Harmony formatting; MAX will apply the model’s HF chat_template.jinja automatically, and the shim keeps Responses semantics while forwarding messages intact.
 
-## 4) Docker (GPU)
+Performance: MoE FFN linears use the fused MXFP4 dequantized matvec/matmul in Mojo; attention and non‑MoE bits use MAX’s highly optimized kernels.
 
-The provided `Dockerfile` uses `modular/max-nvidia-full`. Build and run:
+CPU: The kernels have CPU fallbacks but this repo targets GPU.
 
-```bash
-docker build -t gptoss-120-server .
-docker run --gpus all -e MODEL_ID=openai/gpt-oss-120b -p 8000:8000 gptoss-120-server
-```
+### Make targets
 
-## Notes on custom ops
-
-- Mojo custom ops are discovered by MAX via `InferenceSession(custom_extensions=[custom_ops_dir])`.
-- Our Mojo kernel uses `@compiler.register(...)` and imports `InputTensor/OutputTensor` from `max.tensor`.
-- GPU kernels write into `LayoutTensor[*, *, MutableAnyOrigin]` to permit device writes.
-
-If you hit Mojo syntax errors, check:
-
-- imports exactly match: `import compiler`, `from layout import Layout, LayoutTensor`, `from max.tensor import InputTensor, OutputTensor`, `from gpu import block_idx, thread_idx, block_dim`.
-- your `mojo` toolchain is current, and env vars (`MODULAR_HOME`, `PATH`) are applied to your shell.
-  > ⚠️ The real GPT-OSS-120B weights are far too large for a Mac laptop. Use the tests to validate behaviour locally; perform real inference inside a GPU container (Runpod, etc).
-
-# GPT-OSS 120B Responses Server
-
-This repository implements a Harmony-compliant `/v1/responses` server for GPT-OSS-120B following the build plan in `INSTRUCTIONS.md`. The codebase now supports both MAX (preferred) and Hugging Face Transformers engines and ships custom Mojo MXFP4 kernels ready to be compiled inside the MAX runtime.
-
-Key capabilities:
-
-- **Mojo MXFP4 kernels** for quantize, dequantize, and a fused decode mat-vec (`custom_ops/kernels/mxfp4.mojo`).
-- **Engine switcher** (`serve/model_loader.py`) that loads either MAX (`ENGINE=max`) or Transformers (`ENGINE=transformers`) at runtime while sharing the Harmony tokenizer.
-- **FastAPI Responses server** (`serve/responses_server.py`) exposing `/v1/responses`, `/healthz`, and `/bench`, preserving tool-calls and structured outputs.
-- **Start script & dependencies** (`serve/start.sh`, `serve/requirements.txt`) tuned for MAX NVIDIA containers but runnable in other environments where GPUs are available.
-- **Unit tests** (`tests/`) that validate Harmony rendering, messaging, and tool-call parsing via lightweight stubs—no GPU required.
-
-## Repository layout
-
-```bash
-custom_ops/             # Mojo kernels compiled by MAX at runtime
-serve/
-  model_loader.py       # Engine factory + shared tokenizer
-  responses_server.py   # FastAPI app with Responses + bench endpoint
-  requirements.txt      # Runtime dependencies (FastAPI, Transformers, torch)
-  start.sh              # UVicorn entrypoint (reads ENGINE/MODEL_ID/HF_TOKEN)
-Dockerfile              # MAX base image setup (build remotely or on Runpod)
-INSTRUCTIONS.md         # Original drop-in guidance
-README.md               # This document
-AGENTS.md               # Architecture + change log
-pixi.toml               # Local dev/test environment definition
-tests/                  # Server unit tests using stubbed runtime
-```
-
-## Local development (macOS without Docker)
-
-1. Install dependencies into a Python 3.11+ environment (Pixi keeps things reproducible):
-   ```bash
-   pixi install
-   ```
-2. Run the unit test suite (uses stub engines/tokenizers, so no GPU is required):
-   ```bash
-   pixi run test
-   ```
-
-## Running the server (GPU environment)
-
-Set the relevant environment variables, then launch Uvicorn:
-
-```bash
-export MODEL_ID=openai/gpt-oss-120b
-export ENGINE=max
-uvicorn serve.responses_server:app --host 0.0.0.0 --port 8000
-```
-
-- `ENGINE=max` expects the Modular MAX runtime and will load the Mojo kernels automatically.
-- `ENGINE=transformers` runs the Hugging Face pipeline (useful if MAX lacks MXFP4 loaders yet).
-- `/healthz` reports the active engine; `/bench?n=8&max_new_tokens=64` provides a quick decode TPS probe.
-
-## Preparing for Runpod (build remotely or on the pod)
-
-Although Docker cannot run on this Mac, you can still build the container image remotely or directly on Runpod:
-
-1. **(Remote) Build & push**
-
-   ```bash
-   docker build -t <registry>/gptoss-mxfp4:latest .
-   docker push <registry>/gptoss-mxfp4:latest
-   ```
-
-   _(Run these on a machine with Docker support, e.g., Runpod build pod, remote Linux box, or GitHub Actions.)_
-
-2. **Pod environment variables**
-
-   - `MODEL_ID=openai/gpt-oss-120b`
-   - `ENGINE=max` (fall back to `transformers` if MAX cannot load MXFP4 yet)
-   - `HF_TOKEN=<your_token>` (if the model is gated)
-
-3. **First boot checks**
-   - `curl http://<pod-ip>:8000/healthz`
-   - `curl http://<pod-ip>:8000/bench?n=8&max_new_tokens=64`
-
-Continue with the detailed Runpod bring-up instructions from the latest guidance once you are on a GPU pod.
-
-# GPT-OSS 120B/20B Server (MAX + Mojo custom ops)
-
-This server exposes a Harmony/Responses-style `/v1/responses` endpoint. You can run entirely from a **Runpod start script**—no custom Docker build needed.
-
-## Run the BF16 20B model (local path) on MAX
-
-MAX can load a model from **Hugging Face** *or from a local directory path* via `PipelineConfig(model_path=...)`. For a quick win, use **gpt-oss-20b BF16** from Modular’s builds and point MAX to that path. :contentReference[oaicite:3]{index=3}
-
-### Runpod setup (script-only)
-
-**Environment variables (example):**
-```
-
-REPO_URL=[https://github.com/](https://github.com/)<you>/gptoss-120-server.git
-BRANCH=main
-ENGINE=max
-USE_CUSTOM_OPS=0
-MODEL_ID=/models/gptoss-20b-bf16
-MOD_MODEL_URL=[https://builds.modular.com/models/gpt-oss-20b-BF16/20B](https://builds.modular.com/models/gpt-oss-20b-BF16/20B)
-PORT=8000
-HF_TOKEN=   # optional
-
-```
-
-**Start Script**:
-```
-
-bash -lc 'bash /workspace/gptoss-120-server/scripts/runpod_bootstrap.sh'
-
-````
-
-This will:
-1. Install **uv** (no conda) and the **MAX/Mojo** toolchain.
-2. Clone this repo and install Python deps.
-3. Download the **BF16 20B** build to `/models/gptoss-20b-bf16` (if `MOD_MODEL_URL` set).
-4. Start the server, loading the model from the **local path** (`MODEL_ID=/models/gptoss-20b-bf16`).
-
-> **VRAM note:** BF16 20B uses ~40 GB for weights; total VRAM footprint is commonly **~45–60 GB** with KV cache and runtime overhead, so a single **H100 80GB** is appropriate. :contentReference[oaicite:4]{index=4}
-
-## Local (macOS) quickstart without conda
-
-Use **uv**:
-```bash
-uv pip install -r serve/requirements.txt
-pytest     # local tests
-ENGINE=max USE_CUSTOM_OPS=0 MODEL_ID=/path/to/local/model \
-  uvicorn serve.responses_server:app --host 0.0.0.0 --port 8000
-````
-
-## Why USE_CUSTOM_OPS=0?
-
-For **BF16** models you don’t need MXFP4 custom ops. Disabling them avoids compiling Mojo kernels on bring‑up. You can turn them back on later (`USE_CUSTOM_OPS=1`) if you experiment with quantized paths.
-
-## Building with Google Cloud Build
-
-The repository includes a Cloud Build configuration (`cloudbuild.yaml`) and a helper script (`scripts/cloud_build.sh`) that targets Artifact Registry.
-
-```bash
-./scripts/cloud_build.sh \
-  PROJECT_ID=\
-  REGION= \
-  AR_REPO= \
-  IMAGE_NAME=
-```
-
-The script will:
-
-- ensure the Artifact Registry repository exists (`REGION-docker.pkg.dev/PROJECT_ID/AR_REPO`),
-- submit the build using Cloud Build,
-- push images tagged with both the current git short SHA and `latest`.
-
-Adjust environment variables as needed if you prefer a different region or repository. Track progress from the Cloud Build UI or via `gcloud builds log`.
-
-## Next steps
-
-- Implement the tiled MXFP4 qGEMM for prefill (Stage B of the plan) and integrate batching (Stage C).
-- Capture `/bench` metrics before and after kernel optimizations to track TPS improvements.
-- Follow the Runpod instructions to deploy on an H100 pod once the container image is available.
-
+make max-serve MODEL=openai/gpt-oss-20b DEVICES=gpu:0 # start MAX OpenAI server with custom arch
+make responses-shim # start /v1/responses adapter on :9000
+make clean # remove py cache
