@@ -93,7 +93,6 @@ class MXFP4Linear:
                 # y += b[:, None]
                 y = ops.add(y, ops.broadcast_to(b, [M, ops.shape(y)[1]]))
             return y
-
         # encase in a small graph to allow reuse
         graph = Graph(
             name="mxfp4_linear",
