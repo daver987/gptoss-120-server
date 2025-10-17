@@ -3,8 +3,9 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from max.driver import Device, DeviceRef
+from max.driver import Device
 from max.engine import InferenceSession
+from max.graph import DeviceRef
 from max.graph.weights import Weights, WeightsAdapter
 from max.nn import ReturnLogits
 from max.nn.moe import MoE

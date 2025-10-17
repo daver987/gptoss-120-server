@@ -3,8 +3,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from max.driver import DeviceRef
-from max.graph import Graph, TensorType
+from max.graph import DeviceRef, Graph, TensorType
 from max import dtype as DType, ops
 
 
