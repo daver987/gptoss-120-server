@@ -99,10 +99,15 @@ echo $! > .run/max.pid
 
 # Wait for /health
 log "Waiting for MAX to come up..."
+log "MAX is now downloading weights and compiling graphs; this step can take a few minutes."
 for i in $(seq 1 240); do
   if curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null; then
     log "MAX is healthy on :${PORT}"
     break
+  fi
+  if (( i % 15 == 0 )); then
+    last_log="$(tail -n 1 logs/max.log 2>/dev/null || echo 'no log yet')"
+    log "MAX still starting (attempt ${i}/240). Latest max.log: ${last_log}"
   fi
   sleep 2
   if ! kill -0 "$(cat .run/max.pid 2>/dev/null || echo 0)" 2>/dev/null; then
@@ -110,6 +115,10 @@ for i in $(seq 1 240); do
     exit 1
   fi
 done
+if ! curl -fsS "http://127.0.0.1:${PORT}/health" >/dev/null; then
+  err "MAX never became healthy; exiting."
+  exit 1
+fi
 
 ### ---------- Start Responses shim ----------
 log "Starting /v1/responses shim on :${RESPONSES_PORT}"
@@ -119,6 +128,27 @@ nohup "${PYTHON}" server/responses_app.py \
   > logs/responses.log 2>&1 &
 
 echo $! > .run/responses.pid
+
+log "Waiting for Responses shim health on :${RESPONSES_PORT}"
+for i in $(seq 1 120); do
+  if curl -fsS "http://127.0.0.1:${RESPONSES_PORT}/health" >/dev/null; then
+    log "Responses shim is healthy on :${RESPONSES_PORT}"
+    break
+  fi
+  if (( i % 10 == 0 )); then
+    last_log="$(tail -n 1 logs/responses.log 2>/dev/null || echo 'no log yet')"
+    log "Responses shim still starting (attempt ${i}/120). Latest responses.log: ${last_log}"
+  fi
+  sleep 1
+  if ! kill -0 "$(cat .run/responses.pid 2>/dev/null || echo 0)" 2>/dev/null; then
+    err "Responses shim exited unexpectedly. Check logs/responses.log"
+    exit 1
+  fi
+done
+if ! curl -fsS "http://127.0.0.1:${RESPONSES_PORT}/health" >/dev/null; then
+  err "Responses shim never became healthy; exiting."
+  exit 1
+fi
 
 log "-------------------------------------------------------------------"
 log " Ready!"
