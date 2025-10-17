@@ -10,6 +10,7 @@ import uvicorn
 
 app = FastAPI()
 UPSTREAM = os.environ.get("MAX_UPSTREAM", "http://127.0.0.1:8000")
+REQUEST_TIMEOUT = float(os.environ.get("REQUEST_TIMEOUT", "300"))
 
 
 def responses_to_chat_payload(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -73,7 +74,7 @@ def chat_to_responses(body: Dict[str, Any]) -> Dict[str, Any]:
 async def responses(request: Request):
     body = await request.json()
     payload = responses_to_chat_payload(body)
-    async with httpx.AsyncClient(timeout=60) as client:
+    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
         r = await client.post(f"{UPSTREAM}/v1/chat/completions", json=payload)
         r.raise_for_status()
         data = r.json()
