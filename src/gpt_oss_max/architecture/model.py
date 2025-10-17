@@ -5,7 +5,6 @@ from typing import Optional
 import numpy as np
 from max.driver import Device
 from max.engine import InferenceSession
-from max.graph import DeviceRef
 from max.graph.weights import Weights, WeightsAdapter
 from max.nn import ReturnLogits
 from max.nn.moe import MoE
@@ -64,8 +63,6 @@ class GptOssModel(Llama3Model):
         *,
         expert_prefix: str,  # name scope within weights, e.g. "...layers.{L}.moe.experts.{E}."
     ):
-        devref = DeviceRef.from_device(device)
-
         def get_weight(name: str) -> Optional[np.ndarray]:
             # Try to fetch MXFP4 prepacked q/e; fallback to bf16 weight then quantize.
             # We accept several common key suffixes to be robust:
@@ -95,7 +92,7 @@ class GptOssModel(Llama3Model):
             mod = MXFP4Linear(
                 in_features=in_features,
                 out_features=out_features,
-                device=devref,
+                device=device,
                 mojo_kernels_dir=self._mojo_dir,
                 q=q,
                 e=e,
